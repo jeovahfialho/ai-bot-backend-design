@@ -621,3 +621,113 @@ docker run -p 8080:8080 messaging-system
 - **Monitoring and Alerting**: Use Prometheus, Grafana, and Sentry for real-time system monitoring and quick alerting for intervention.
 
 This flow covers common failures and recovery mechanisms, providing a clear view of how the system maintains high availability and resilience even under adverse conditions.
+
+## Detailed System Execution Flow with Errors
+
+### Execution Flow with Errors
+
+1. **Initial Interaction**
+    - **User**: Sends a message through the **Chat Client** (user interface).
+    - **Chat Client**: Sends the message to the **API Gateway** via an HTTP POST request to the `/sendMessage` endpoint.
+
+2. **Message Reception**
+    - **API Gateway (Kong, NGINX)**: Receives the HTTP request.
+    - **Availability Check**: The API Gateway checks if the **Event Bus (Kafka)** is available.
+        - **Kafka Failure**:
+            - **Retry**: The API Gateway attempts to resend the message for a defined number of retries.
+            - **Circuit Breaker**: If Kafka remains unavailable, the Circuit Breaker is activated to temporarily prevent further attempts.
+            - **Fallback**: The message is temporarily stored in **Redis** until Kafka becomes available again.
+            - **Alert**: An alert is sent to the operations team via **Sentry** and **Prometheus** logs the failure.
+    - **Event Bus (Kafka)**: If available, enqueues the message in the "messages" topic.
+
+3. **Message Processing**
+    - **Bot Engine**:
+        - **Consumes the message** from the "messages" topic in Kafka.
+        - **NLP Processing**: Analyzes the message using Natural Language Processing (NLP) to determine the appropriate response.
+        - **Decision**: Determines if the response can be automated or if it needs to be routed to a human agent.
+        - **Availability Check**: Before saving the response or routing to a human agent, the Bot Engine checks the availability of databases and notification services.
+            - **MongoDB Failure**:
+                - **Retry**: The Bot Engine attempts to save the message and response to MongoDB for a defined number of retries.
+                - **Circuit Breaker**: If MongoDB remains unavailable, the Circuit Breaker is activated.
+                - **Fallback**: The message is saved to **PostgreSQL** as a temporary alternative.
+                - **Alert**: An alert is sent to the operations team via **Sentry**.
+            - **PostgreSQL Failure**:
+                - **Retry**: The Bot Engine attempts to save the metadata to PostgreSQL for a defined number of retries.
+                - **Circuit Breaker**: If PostgreSQL remains unavailable, the Circuit Breaker is activated.
+                - **Fallback**: The message and metadata are temporarily stored in **Redis**.
+                - **Alert**: An alert is sent to the operations team via **Sentry**.
+
+4. **Routing to Human Agent (if needed)**
+    - **Human Agent Router**:
+        - **Consumes the event** from Kafka indicating the need for human intervention.
+        - **Sends the message** to the **Agent Dashboard** (customer support interface).
+        - **Communication Failure**:
+            - **Retry**: Attempts to resend the message to the Agent Dashboard.
+            - **Circuit Breaker**: If communication fails continuously, the Circuit Breaker is activated.
+            - **Alert**: An alert is sent via **Sentry**.
+
+5. **Response to User**
+    - **Bot Engine**:
+        - **Publishes the response** to Kafka to be consumed by the **API Gateway**.
+        - **Failure to Publish**:
+            - **Retry**: Attempts to publish the response again.
+            - **Circuit Breaker**: If continuous failures occur, the Circuit Breaker is activated.
+            - **Fallback**: The response is stored in **Redis**.
+    - **API Gateway**:
+        - **Receives the response** from Kafka.
+        - **Sends the response** back to the **Chat Client** via an HTTP request.
+        - **Failure to Send**:
+            - **Retry**: Attempts to resend the response.
+            - **Circuit Breaker**: If the failure persists, the Circuit Breaker is activated.
+            - **Alert**: An alert is sent via **Sentry**.
+
+6. **Notifications and Integrations**
+    - **Notification Service (Twilio, SendGrid)**:
+        - **Notification Sending Failure**:
+            - **Retry**: Attempts to resend the notification.
+            - **Circuit Breaker**: If continuous failures occur, the Circuit Breaker is activated.
+            - **Fallback**: The notification is stored for later sending.
+    - **CRM Integration Service**:
+        - **CRM Update Failure**:
+            - **Retry**: Attempts to resend data to the CRM.
+            - **Circuit Breaker**: If continuous failures occur, the Circuit Breaker is activated.
+            - **Fallback**: Data is stored for later update.
+    - **E-commerce Integration Service**:
+        - **E-commerce Action Failure**:
+            - **Retry**: Attempts to perform the action again.
+            - **Circuit Breaker**: If continuous failures occur, the Circuit Breaker is activated.
+            - **Fallback**: The action is stored for later execution.
+
+7. **Monitoring and Logging**
+    - **Prometheus**:
+        - **Collects metrics** in real-time on system performance (latency, error rate, etc.).
+        - **Sends metrics** to **Grafana** for visualization and alert configuration.
+    - **ELK Stack (Elasticsearch, Logstash, Kibana)**:
+        - **Logstash**: Receives logs from services.
+        - **Elasticsearch**: Stores logs for querying.
+        - **Kibana**: Allows visualization and analysis of logs.
+    - **Sentry**:
+        - **Monitors errors** and exceptions in the system.
+        - **Sends alerts** to developers.
+
+8. **Data Storage**
+    - **PostgreSQL**:
+        - **Stores structured data** such as interaction metadata and transactions.
+    - **MongoDB**:
+        - **Stores semi-structured data** such as message histories and activity logs.
+    - **AWS S3**:
+        - **Stores large files** and binaries associated with interactions.
+    - **Redis**:
+        - **Stores frequently accessed data** to improve system performance.
+
+### Ensuring High Availability
+
+- **Microservices Architecture**: Allows independent development and deployment of services.
+- **Auto-scaling with Kubernetes**: Ensures the system automatically adjusts to varying loads by scaling resources up or down as needed.
+- **Circuit Breakers and Retries**: Prevent catastrophic failures and enable automatic recovery from temporary faults.
+- **Load Balancers**: Efficiently distribute network traffic among multiple service instances.
+- **Fallback Mechanisms**: Use Redis and other temporary storage solutions to ensure operations can be completed later when the system recovers.
+- **Database Replication and Sharding**: Ensure high availability and scalability of data.
+- **Monitoring and Alerting**: Use Prometheus, Grafana, and Sentry for real-time system monitoring and quick alerting for intervention.
+
+This flow covers common failures and recovery mechanisms, providing a clear view of how the system maintains high availability and resilience even under adverse conditions.
