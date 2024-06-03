@@ -135,7 +135,12 @@ package main
 import (
     "net/http"
     "github.com/gin-gonic/gin"
+    "github.com/streadway/handy/breaker"
+    "github.com/streadway/handy/retry"
+    "time"
 )
+
+var circuit = breaker.NewBreaker(3) // Circuit Breaker with a threshold of 3 failures
 
 type MessageRequest struct {
     UserID  string `json:"userId"`
@@ -149,8 +154,16 @@ func SendMessageHandler(c *gin.Context) {
         return
     }
 
-    if err := publishEvent("messageReceived", message.UserID, message.Message); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process message"})
+    // Use Circuit Breaker and Retry for the publishEvent operation
+    err := circuit.Run(func() error {
+        return retry.Retry(3, 2*time.Second, func() error {
+            return publishEvent("messageReceived", message.UserID, message.Message)
+        })
+    })
+
+    if err != nil {
+        // Fallback response
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process message", "fallback": "Please try again later"})
         return
     }
 
@@ -174,7 +187,7 @@ import (
 
 var kafkaWriter *kafka.Writer
 var kafkaReader *kafka.Reader
-var circuit *breaker.Breaker
+var circuit = breaker.NewBreaker(3) // Circuit Breaker with a threshold of 3 failures
 
 func init() {
     kafkaWriter = &kafka.Writer{
@@ -188,8 +201,6 @@ func init() {
         Topic:   "messages",
         GroupID: "message-group",
     })
-
-    circuit = breaker.NewBreaker()
 }
 
 func publishEvent(eventType, userID, message string) error {
@@ -199,7 +210,9 @@ func publishEvent(eventType, userID, message string) error {
     }
 
     err := circuit.Run(func() error {
-        return kafkaWriter.WriteMessages(context.Background(), msg)
+        return retry.Retry(3, 2*time.Second, func() error {
+            return kafkaWriter.WriteMessages(context.Background(), msg)
+        })
     })
 
     if err != nil {
@@ -228,13 +241,18 @@ func processMessage(message string) {
     if requiresHumanIntervention(response) {
         publishEvent("humanInterventionRequired", userID, messageContent)
     } else {
-        retry.Retry(3, 1*time.Second, func() error {
-            if err := saveMessageToDB(userID, messageContent, response); err != nil {
-                log.Printf("Failed to save message: %v", err)
-                return err
-            }
-            return sendResponse(userID, response)
+        err := circuit.Run(func() error {
+            return retry.Retry(3, 2*time.Second, func() error {
+                if err := saveMessageToDB(userID, messageContent, response); err != nil {
+                    log.Printf("Failed to save message: %v", err)
+                    return err
+                }
+                return sendResponse(userID, response)
+            })
         })
+        if err != nil {
+            log.Printf("Failed to process message: %v", err)
+        }
     }
 }
 
@@ -264,7 +282,7 @@ import (
 )
 
 var mongoClient *mongo.Client
-var mongoCircuit *breaker.Breaker
+var mongoCircuit = breaker.NewBreaker(3) // Circuit Breaker with a threshold of 3 failures
 
 func init() {
     clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
@@ -273,19 +291,20 @@ func init() {
         log.Fatal(err)
     }
     mongoClient = client
-    mongoCircuit = breaker.NewBreaker()
 }
 
 func saveToMongoDB(userID, message, response string) error {
     collection := mongoClient.Database("chat_logs").Collection("messages")
     err := mongoCircuit.Run(func() error {
-        _, err := collection.InsertOne(context.TODO(), bson.D{
-            {Key: "userId", Value: userID},
-            {Key: "message", Value: message},
-            {Key: "response", Value: response},
-            {Key: "timestamp", Value: time.Now()},
+        return retry.Retry(3, 2*time.Second, func() error {
+            _, err := collection.InsertOne(context.TODO(), bson.D{
+                {Key: "userId", Value: userID},
+                {Key: "message", Value: message},
+                {Key: "response", Value: response},
+                {Key: "timestamp", Value: time.Now()},
+            })
+            return err
         })
-        return err
     })
 
     if err != nil {
@@ -310,23 +329,24 @@ import (
 )
 
 var db *sql.DB
-var pgCircuit *breaker.Breaker
+var pgCircuit = breaker.NewBreaker(3) // Circuit Breaker with a threshold of 3 failures
 
 func init() {
     var err error
-    connStr := "user=yourusername dbname=yourdbname sslmode=disable"
+    connStr = "user=yourusername dbname=yourdbname sslmode=disable"
     db, err = sql.Open("postgres", connStr)
     if err != nil {
         log.Fatal(err)
     }
-    pgCircuit = breaker.NewBreaker()
 }
 
 func saveToPostgres(userID, message, response string) error {
-    query := `INSERT INTO messages (user_id, message, response) VALUES ($1, $2, $3)`
+    query = `INSERT INTO messages (user_id, message, response) VALUES ($1, $2, $3)`
     err := pgCircuit.Run(func() error {
-        _, err := db.Exec(query, userID, message, response)
-        return err
+        return retry.Retry(3, 2*time.Second, func() error {
+            _, err = db.Exec(query, userID, message, response)
+            return err
+        })
     })
 
     if err != nil {
@@ -365,13 +385,10 @@ import (
     "encoding/json"
     "github.com/streadway/handy/breaker"
     "github.com/streadway/handy/retry"
+    "time"
 )
 
-var responseCircuit *breaker.Breaker
-
-func init() {
-    responseCircuit = breaker.NewBreaker()
-}
+var responseCircuit = breaker.NewBreaker(3) // Circuit Breaker with a threshold of 3 failures
 
 func sendResponse(userID, response string) error {
     payload := map[string]string{
@@ -384,15 +401,18 @@ func sendResponse(userID, response string) error {
         return err
     }
 
-    err = retry.Retry(3, 1*time.Second, func() error {
-        _, err := http.Post("http://localhost:8080/api/sendResponse", "application/json", bytes.NewBuffer(payloadBytes))
-        if err != nil {
-            log.Printf("Failed to send response: %v", err)
+    err = responseCircuit.Run(func() error {
+        return retry.Retry(3, 2*time.Second, func() error {
+            _, err := http.Post("http://localhost:8080/api/sendResponse", "application/json", bytes.NewBuffer(payloadBytes))
             return err
-        }
-        return nil
+        })
     })
-    return err
+
+    if err != nil {
+        log.Printf("Failed to send response: %v", err)
+        return err
+    }
+    return nil
 }
 ```
 
@@ -619,3 +639,220 @@ This flow covers common failures and recovery mechanisms, providing a clear view
         - **Stores large files** and binaries associated with interactions.
     - **Redis**:
         - **Stores frequently accessed data** to improve system performance.
+
+# Practical Example of Sending and Reading a Message
+
+## 1. Client Sends a Message
+
+**Client** sends a message via **Chat Client**.
+- **Endpoint**: POST `/sendMessage`
+- **Payload**:
+    ```json
+    {
+      "userId": "12345",
+      "message": "Hello, I need help with my order."
+    }
+    ```
+
+**API Gateway** receives the request and forwards it to the **Event Bus**.
+- **Endpoint (API Gateway)**: POST `/api/sendMessage`
+- **Endpoint (Event Bus)**: POST `/event/messageReceived`
+- **Payload**:
+    ```json
+    {
+      "eventType": "messageReceived",
+      "data": {
+        "userId": "12345",
+        "message": "Hello, I need help with my order."
+      }
+    }
+    ```
+
+**Event Bus (Apache Kafka)** processes the event and sends it to the **Bot Engine**.
+
+## 2. Message Processing by Bot Engine
+
+**Bot Engine** consumes the event from the **Event Bus** and processes the message using NLP.
+- **Kafka Consumer Function**:
+    ```go
+    func consumeMessage(event Event) {
+        userId := event.data["userId"]
+        message := event.data["message"]
+        response := processNLP(message)
+        if requiresHumanIntervention(response) {
+            publishEvent("humanInterventionRequired", userId, message)
+        } else {
+            saveMessageToDB(userId, message, response)
+            sendResponse(userId, response)
+        }
+    }
+    ```
+
+**Check for Human Intervention**:
+- **Function**:
+    ```go
+    func requiresHumanIntervention(response string) bool {
+        // Logic to determine if human intervention is needed
+        return false // For simplicity, assuming no intervention needed
+    }
+    ```
+
+**Save the Message in Databases**:
+- **SQL Database (PostgreSQL)**: Stores structured messages and metadata.
+    ```sql
+    INSERT INTO messages (user_id, message, response) VALUES ($1, $2, $3)
+    ```
+
+- **NoSQL Database (MongoDB)**: Stores semi-structured logs and additional information.
+    ```go
+    collection := client.Database("chat_logs").Collection("messages")
+    _, err := collection.InsertOne(context.TODO(), bson.D{
+        {Key: "userId", Value: userId},
+        {Key: "message", Value: message},
+        {Key: "response", Value: response},
+        {Key: "timestamp", Value: time.Now()},
+    })
+    ```
+
+**Send the Response to the Client**:
+- **Endpoint**: POST `/api/sendResponse`
+- **Payload**:
+    ```json
+    {
+      "userId": "12345",
+      "response": "Thank you for contacting us. Your order details are..."
+    }
+    ```
+
+- **Function**:
+    ```go
+    func sendResponse(userId string, response string) {
+        // Send response to the client via the API Gateway
+    }
+    ```
+
+## 3. Integration with Notifications and CRM
+
+**Notification Service** sends additional notifications if necessary.
+- **Endpoint**: POST `/api/notify`
+- **Payload**:
+    ```json
+    {
+      "userId": "12345",
+      "notification": "Your order has been shipped."
+    }
+    ```
+
+**CRM Integration Service** updates information in the CRM system.
+- **Endpoint**: POST `/api/updateCRM`
+- **Payload**:
+    ```json
+    {
+      "userId": "12345",
+      "message": "Customer inquired about order status."
+    }
+    ```
+
+## 4. Monitoring and Logging
+
+**Prometheus** collects metrics and **Grafana** visualizes them.
+**ELK Stack** centralizes logs.
+- **Example Log (Elasticsearch)**:
+    ```json
+    {
+      "timestamp": "2023-06-01T12:34:56Z",
+      "userId": "12345",
+      "message": "Hello, I need help with my order.",
+      "response": "Thank you for contacting us. Your order details are...",
+      "status": "success"
+    }
+    ```
+
+## 5. Scalability and Fault Tolerance
+
+- **Load Balancers (NGINX, HAProxy)** distribute traffic.
+- **Kubernetes** manages auto-scaling.
+- **Circuit Breakers** prevent failures from propagating.
+- **Backup and Recovery** are automated.
+- **Replication and Cross-region Replication** ensure high availability.
+
+## Handling Errors
+
+### 1. Error in Sending Message
+
+If the **Event Bus** or **Bot Engine** is down, the **API Gateway** retries the request.
+- **Retry Logic**:
+    ```go
+    err := retry.Do(
+        func() error {
+            return publishEvent("messageReceived", userId, message)
+        },
+        retry.Attempts(3),
+        retry.DelayType(retry.FixedDelay),
+        retry.Delay(2*time.Second),
+    )
+    if err != nil {
+        log.Printf("Failed to publish event: %v", err)
+    }
+    ```
+
+### 2. Error in Processing Message
+
+If the **Bot Engine** cannot process the message, it logs the error and sends an alert via **Sentry**.
+- **Error Handling in Bot Engine**:
+    ```go
+    func processMessage(message string) {
+        defer func() {
+            if r := recover(); r != nil {
+                log.Printf("Recovered from error: %v", r)
+                sentry.CaptureException(fmt.Errorf("processMessage panic: %v", r))
+            }
+        }()
+        // Process message logic
+    }
+    ```
+
+### 3. Database Errors
+
+If there's a failure in saving data to **PostgreSQL** or **MongoDB**, the **Bot Engine** uses a circuit breaker to prevent further calls and retries after some delay.
+- **Circuit Breaker and Retry for Database Operations**:
+    ```go
+    err := circuitBreaker.Run(func() error {
+        return retry.Do(
+            func() error {
+                return saveToPostgres(userId, message, response)
+            },
+            retry.Attempts(3),
+            retry.DelayType(retry.FixedDelay),
+            retry.Delay(2*time.Second),
+        )
+    })
+    if err != nil {
+        log.Printf("Circuit breaker open: %v", err)
+    }
+    ```
+
+### 4. Network Issues
+
+If there are network issues, the system falls back to a default response and logs the incident.
+- **Fallback Response**:
+    ```go
+    func sendResponse(userId string, response string) {
+        err := retry.Do(
+            func() error {
+                return postResponse(userId, response)
+            },
+            retry.Attempts(3),
+            retry.DelayType(retry.FixedDelay),
+            retry.Delay(2*time.Second),
+        )
+        if err != nil {
+            log.Printf("Failed to send response: %v", err)
+            sendFallbackResponse(userId)
+        }
+    }
+
+    func sendFallbackResponse(userId string) {
+        // Send a generic fallback response
+    }
+    ```
