@@ -107,7 +107,7 @@ require (
 - Large files are stored in AWS S3.
 - Frequently accessed data is stored in Redis.
 
-## Implementation
+# Implementation
 
 ### main.go
 
@@ -466,7 +466,7 @@ docker run -p 8080:8080 messaging-system
 - **Throughput**: Track the number of messages processed per second.
 - **Uptime**: Ensure high availability of the system.
 
-## Detailed System Execution Flow
+# Detailed System Execution Flow
 
 ### Execution Flow with Errors
 
