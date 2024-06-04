@@ -1,3 +1,4 @@
+![Logo da Minha Empresa](diagram.png)
 
 # AI-Enabled Bot Platform
 
