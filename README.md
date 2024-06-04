@@ -1,4 +1,4 @@
-![Logo da Minha Empresa](diagram.png)
+![Simple Diagram](diagram.png)
 
 # AI-Enabled Bot Platform
 
